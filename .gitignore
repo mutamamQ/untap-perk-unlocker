@@ -1,0 +1,9 @@
+# recon / capture artifacts — not part of the userscript
+recon_*
+*.har
+*.html
+Untap.in - Play-test Trading Card Games Online_files/
+test-userscript-shim.js
+test-userscript-shim.js
+userscript_test_evidence.json
+.inject_note.js

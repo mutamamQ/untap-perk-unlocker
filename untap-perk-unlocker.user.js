@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Untap.in Perk Unlocker
 // @namespace    untap-recon
-// @version      0.12.0
-// @description  Free-account quality-of-life unlocks + lobby helper (F8) + second-seat claim (F9) in-game
+// @version      0.13.0
+// @description  Free-account QoL unlocks + lobby (F8) + second-seat (F9) + custom card sleeve (F10) + local playmat (F11)
 // @match        https://untap.in/*
 // @run-at       document-idle
 // @grant        none
@@ -35,6 +35,7 @@
     lobbyTimer: null,
     lobbyStatus: null,
     joining: null,
+    matStyleEl: null,
   };
 
   function applyUnlockFields(account) {
@@ -798,6 +799,139 @@
     }
   }
 
+  // =====================================================================
+  // Custom card sleeve / card back (F10): SERVER-BACKED, visible to opponents.
+  // The account-level sleeve (set-user-image type:'deck' -> /sleeve/<username>)
+  // is tier-gated server-side (410 for free accounts). But the PER-DECK sleeve
+  // RPC `update-deck-back` is NOT tier-checked and its image is served from the
+  // ungated card-art route /cardimg/<deck_uid>/deck_back, so it renders in-game
+  // for everyone. We pick an image file locally and push it to a deck.
+  // =====================================================================
+  const SLEEVE_W = 223, SLEEVE_H = 310; // untap's recommended sleeve size
+
+  function pickImageFile(maxW, maxH) {
+    // Returns a Promise<dataUri> for a user-chosen image, rescaled to fit maxW x maxH.
+    return new Promise((resolve, reject) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.style.display = 'none';
+      input.addEventListener('change', () => {
+        const file = input.files && input.files[0];
+        input.remove();
+        if (!file) { reject(new Error('no file')); return; }
+        const fr = new FileReader();
+        fr.onload = () => {
+          const img = new Image();
+          img.onload = () => {
+            // scale down to fit the target box, keep aspect, never upscale
+            const scale = Math.min(1, maxW / img.width, maxH / img.height);
+            const w = Math.max(1, Math.round(img.width * scale));
+            const h = Math.max(1, Math.round(img.height * scale));
+            const c = document.createElement('canvas');
+            c.width = w; c.height = h;
+            c.getContext('2d').drawImage(img, 0, 0, w, h);
+            try { resolve(c.toDataURL('image/png')); }
+            catch (e) { reject(e); }
+          };
+          img.onerror = () => reject(new Error('bad image'));
+          img.src = fr.result;
+        };
+        fr.onerror = () => reject(new Error('read failed'));
+        fr.readAsDataURL(file);
+      });
+      document.body.appendChild(input);
+      input.click();
+    });
+  }
+
+  function myDecks() {
+    const stores = storeMap();
+    const ds = stores && stores.get('deckStore');
+    return (ds && Array.isArray(ds.deckListStore)) ? ds.deckListStore : [];
+  }
+
+  // Resolve which deck to set the sleeve on: the deck loaded in the current game
+  // if we're in one, else the only deck, else ask.
+  function targetDeckUid() {
+    const stores = storeMap();
+    const myGame = stores && stores.get('myGameStore');
+    const g = myGame && myGame.obj;
+    if (g && g.my && g.my.deck && g.my.deck.deck_uid) return g.my.deck.deck_uid;
+    const decks = myDecks();
+    if (decks.length === 1) return decks[0].deck_uid;
+    if (decks.length > 1) {
+      const titles = decks.map((d, i) => (i + 1) + ') ' + (d.title || d.deck_uid));
+      const pick = window.prompt('Which deck gets the sleeve?\n' + titles.join('\n') + '\n\nEnter a number:', '1');
+      const idx = parseInt(pick, 10) - 1;
+      if (idx >= 0 && idx < decks.length) return decks[idx].deck_uid;
+      return null;
+    }
+    return null;
+  }
+
+  async function setCardSleeve() {
+    const deckUid = targetDeckUid();
+    if (!deckUid) { log('F10: no deck to set a sleeve on'); return; }
+    let dataUri;
+    try { dataUri = await pickImageFile(SLEEVE_W, SLEEVE_H); }
+    catch (e) { log('F10: image pick cancelled'); return; }
+    log('F10: uploading sleeve to deck', deckUid);
+    try {
+      const resp = await callRpc('update-deck-back', { deck_uid: deckUid, dataUri, zone: 'deck-1' });
+      // success reply is [null, "Success, card sleeve updated."]; error is [msg, ...]
+      if (Array.isArray(resp) && resp[0]) { warn('F10: sleeve rejected —', resp[0]); return; }
+      log('F10: sleeve set (served via /cardimg/' + deckUid + '/deck_back)');
+    } catch (e) {
+      warn('F10: update-deck-back failed', e);
+    }
+  }
+
+  // =====================================================================
+  // Local playmat (F11): board background, LOCAL-ONLY (visible to you, not to
+  // opponents). The real playmat is served from /playmat/<username>?<uid>,
+  // which the server refuses (410) for free accounts and which every opponent's
+  // own client fetches independently — so there is no way to make a custom mat
+  // opponent-visible without a Powered-Up account. This paints your own board
+  // via an injected !important stylesheet and persists the image in localStorage.
+  // =====================================================================
+  const MAT_KEY = 'ut-unlock-local-mat';
+
+  function applyLocalMat(dataUri) {
+    if (!state.matStyleEl) {
+      state.matStyleEl = document.createElement('style');
+      state.matStyleEl.id = 'ut-unlock-mat-style';
+      document.head.appendChild(state.matStyleEl);
+    }
+    if (!dataUri) { state.matStyleEl.textContent = ''; return; }
+    // .playmat.mine is our own board layer; force our image over the default and
+    // raise opacity (default playmatOpacity is 0.1) so it's actually visible.
+    state.matStyleEl.textContent =
+      '.playmat.mine{background-image:url("' + dataUri + '")!important;' +
+      'background-size:cover!important;background-position:center!important;opacity:1!important;}';
+  }
+
+  function restoreLocalMat() {
+    let saved = null;
+    try { saved = localStorage.getItem(MAT_KEY); } catch (e) { /* ignore */ }
+    if (saved) applyLocalMat(saved);
+  }
+
+  async function setLocalMat() {
+    let dataUri;
+    try { dataUri = await pickImageFile(1208, 340); } // 2x the recommended 604x170
+    catch (e) { log('F11: image pick cancelled'); return; }
+    try { localStorage.setItem(MAT_KEY, dataUri); } catch (e) { warn('F11: could not persist mat (too large?)'); }
+    applyLocalMat(dataUri);
+    log('F11: local playmat applied (visible to you only, not opponents)');
+  }
+
+  function clearLocalMat() {
+    try { localStorage.removeItem(MAT_KEY); } catch (e) { /* ignore */ }
+    applyLocalMat(null);
+    log('Shift+F11: local playmat cleared');
+  }
+
   function bindLobbyHotkey() {
     document.addEventListener('keydown', (e) => {
       const t = e.target;
@@ -812,6 +946,15 @@
         if (e.shiftKey) releaseSecondSeat();
         else claimSecondSeat();
       }
+      if (e.key === 'F10' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        setCardSleeve();
+      }
+      if (e.key === 'F11' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        if (e.shiftKey) clearLocalMat();
+        else setLocalMat();
+      }
     });
   }
 
@@ -824,6 +967,7 @@
     ensureChipMounted();
     startPolling();
     bindLobbyHotkey();
+    restoreLocalMat();
     try { if (localStorage.getItem(LOBBY_KEY) === '1') toggleLobby(true); } catch (e) { /* ignore */ }
   }
 

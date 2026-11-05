@@ -16,6 +16,13 @@ restores free-account quality-of-life features and adds a lobby helper panel.
   controls (password / friends-only / patron-only) and a join button. It
   mirrors the app's own list filter (hides blocked/started/full rooms) and
   never joins anything automatically.
+- **Second-seat claim (press `F9` in a game)** — claim an extra seat in the
+  same game, the perk-gated "Play a second seat" / "Play another seat" action.
+  `Shift+F9` releases a seat. The store action (`claim-alt-seat`) has no perk
+  check; F9 drives it directly so it works even before the button renders, and
+  only fires when a claim is actually legal (PENDING game, you're a seated
+  player, room not full, under the 8-seat cap). Results are logged to the
+  console; nothing happens silently.
 - **Status chip** — a small draggable indicator showing script state.
 
 ## Install

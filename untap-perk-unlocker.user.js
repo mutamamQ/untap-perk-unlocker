@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Untap.in Perk Unlocker
 // @namespace    untap-recon
-// @version      0.11.3
-// @description  Free-account quality-of-life unlocks + lobby helper (F8) listing password / friends-only rooms
+// @version      0.12.0
+// @description  Free-account quality-of-life unlocks + lobby helper (F8) + second-seat claim (F9) in-game
 // @match        https://untap.in/*
 // @run-at       document-idle
 // @grant        none
@@ -711,6 +711,93 @@
     }
   }
 
+  // =====================================================================
+  // Second-seat claim (F9): the app lets you play more than one seat in the
+  // same game (claimSeatLabel: "Play a second seat" / "Play another seat"),
+  // but gates the button behind auths.perks — secondSeat()/claimSeat() both
+  // open the upgrade modal when !$account.auths.perks. The underlying store
+  // action myGameStore.claimAltSeat() -> do('claim-alt-seat',{}) carries NO
+  // perk check, so with hasPerks already patched the UI button works too; F9
+  // just drives the same store action directly so it works even if the button
+  // isn't rendered yet. releaseAltSeat() -> do('release-alt-seat') undoes it.
+  //
+  // Guards mirror the app's own showClaimSeat/canSecondSeat getters so we only
+  // fire when a claim is actually legal (avoids a wasted RPC + server reject):
+  //   - must be in a game, as a player (not spectator)
+  //   - gameType 'game', not a deckvdeck table
+  //   - game state PENDING, room not full, haven't played yet
+  //   - current seat count below the app's max (8 — the alt-seat prefix list
+  //     "","bizarro-","clone-","alt-","echo-","shadow-","twin-","ghost-")
+  // =====================================================================
+  const MAX_SEATS = 8;
+
+  function seatState() {
+    const stores = storeMap();
+    const myGame = stores && stores.get('myGameStore');
+    const g = myGame && myGame.obj;
+    const acct = (window.accountStore && window.accountStore.account) || {};
+    const me = acct.username;
+    if (!myGame || !g || !me) return { myGame: null, g: null, reason: 'not in a game' };
+    const seats = (g.mySeats || []).length;
+    return { myGame, g, me, seats };
+  }
+
+  function canClaimSeat(st) {
+    const { g, me } = st;
+    if (!g) return 'not in a game';
+    if (g.isSpectator) return 'spectating — not a player';
+    if (g.gameType !== 'game') return 'not a standard game';
+    if (g.gameOptions && g.gameOptions.deckvdeck) return 'deck-vs-deck table';
+    if (!(g.playerUsernames || []).includes(me)) return 'not seated in this game';
+    if (g.currentGame && g.currentGame.state !== 'PENDING') return 'game already started';
+    if ((g.gamesPlayed || []).length > 1) return 'already played here';
+    const max = g.maxPlayers || 0;
+    if (max && (g.players || []).length >= max) return 'room is full';
+    if ((g.mySeats || []).length >= MAX_SEATS) return 'already at the seat limit (' + MAX_SEATS + ')';
+    return null; // ok
+  }
+
+  function claimSecondSeat() {
+    const st = seatState();
+    if (!st.myGame) { setLobbyStatus(''); log('F9: not in a game'); return; }
+    const before = st.seats;
+    const why = canClaimSeat(st);
+    if (why) { log('F9: cannot claim second seat —', why); return; }
+    log('F9: claiming second seat (current seats: ' + before + ')');
+    try {
+      st.myGame.claimAltSeat();
+    } catch (e) {
+      warn('F9: claimAltSeat threw', e);
+      return;
+    }
+    // The claim is confirmed asynchronously (server pushes a new _player_ row
+    // into gamesStore, obj recomputes mySeats). Poll briefly to log the result.
+    const start = Date.now();
+    const poll = setInterval(() => {
+      const now = seatState();
+      if (!now.myGame) { clearInterval(poll); return; }
+      if (now.seats > before) {
+        clearInterval(poll);
+        log('F9: second seat confirmed (seats: ' + now.seats + ')');
+      } else if (Date.now() - start > 6000) {
+        clearInterval(poll);
+        warn('F9: second seat not confirmed within 6s (seats still ' + now.seats + ')');
+      }
+    }, 300);
+  }
+
+  function releaseSecondSeat() {
+    const st = seatState();
+    if (!st.myGame) { log('F9: not in a game'); return; }
+    if (st.seats <= 1) { log('Shift+F9: only one seat — nothing to release'); return; }
+    log('Shift+F9: releasing a seat (current seats: ' + st.seats + ')');
+    try {
+      st.myGame.releaseAltSeat();
+    } catch (e) {
+      warn('Shift+F9: releaseAltSeat threw', e);
+    }
+  }
+
   function bindLobbyHotkey() {
     document.addEventListener('keydown', (e) => {
       const t = e.target;
@@ -719,6 +806,11 @@
       if (e.key === 'F8' && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault();
         toggleLobby();
+      }
+      if (e.key === 'F9' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        if (e.shiftKey) releaseSecondSeat();
+        else claimSecondSeat();
       }
     });
   }

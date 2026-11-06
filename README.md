@@ -5,6 +5,11 @@ restores free-account quality-of-life features and adds a lobby helper panel.
 
 ## Features
 
+Everything is reachable from a small **green dot** in the bottom-left corner.
+Click the dot to open/collapse a menu; drag it to move. The menu holds a status
+line plus one button per feature — nothing is keybind-only (the lobby helper
+also still answers `F8` as a shortcut).
+
 - **Perk unlock** — forces `hasPerks` on the account state so perk-gated
   quality-of-life features (deck slots, etc.) are usable on a free account.
   `tier` is left untouched on purpose: every gate keys off `hasPerks`, and
@@ -12,33 +17,32 @@ restores free-account quality-of-life features and adds a lobby helper panel.
 - **Deck slot unlock** — clears the `locked` flag on locked deck slots.
 - **Re-login aware** — re-applies unlocks whenever the account store updates,
   so it survives logout/login without a page reload.
-- **Lobby helper (press `F8`)** — a floating panel listing rooms with access
-  controls (password / friends-only / patron-only) and a join button. It
+- **Lobby helper** (menu button, or `F8`) — a floating panel listing rooms with
+  access controls (password / friends-only / patron-only) and a join button. It
   mirrors the app's own list filter (hides blocked/started/full rooms) and
   never joins anything automatically.
-- **Second-seat claim (press `F9` in a game)** — claim an extra seat in the
-  same game, the perk-gated "Play a second seat" / "Play another seat" action.
-  `Shift+F9` releases a seat. Drives the `claim-alt-seat` action directly.
-  **Note:** unlike the other unlocks, the server enforces this one — a free
-  account's claim is rejected with "Claiming a second seat is a Powered-Up
-  perk." So F9 only succeeds on a Powered-Up account; on a free account it
-  logs the rejection. Guards still ensure it only fires when a claim would be
-  legal (PENDING game, seated player, room not full, under the 8-seat cap).
-- **Custom card sleeve / card back (press `F10`)** — pick an image and it
+- **Custom card sleeve / card back** (menu button) — pick an image and it
   becomes your deck's card back, visible to opponents in-game. Uses the
   per-deck `update-deck-back` RPC (not the tier-gated account-level sleeve),
   whose image is served from the ungated card-art route
   `/cardimg/<deck_uid>/deck_back`. In a game it targets the loaded deck;
   otherwise it uses your only deck (or prompts if you have several). The
   account-level sleeve route is server-side tier-gated and can't be unlocked.
-- **Local playmat (press `F11`)** — pick an image to use as your board
-  background. `Shift+F11` clears it. **Local-only: you see it, opponents do
-  not.** The real playmat (`/playmat/<username>`) is served only to Powered-Up
-  accounts (free accounts get HTTP 410), and each opponent's client fetches
-  that gated URL independently, so there is no way to show a custom playmat to
-  opponents without a subscription. This paints your own board via injected CSS
-  and persists in `localStorage`.
-- **Status chip** — a small draggable indicator showing script state.
+- **Local playmat** (menu buttons: set / clear) — pick an image to use as your
+  board background. **Local-only: you see it, opponents do not.** The real
+  playmat (`/playmat/<username>`) is served only to Powered-Up accounts (free
+  accounts get HTTP 410), and each opponent's client fetches that gated URL
+  independently, so there is no way to show a custom playmat to opponents
+  without a subscription. This paints your own board via injected CSS and
+  persists in `localStorage`.
+- **Create multi-seat game** (menu button) — create a deck-vs-deck table where
+  you play every seat yourself (2–6 of your own decks). This is the free path to
+  the paid multi-seat capability: `create-game-ge2` accepts `deckvdeck:true`
+  from a free account (the in-app toggle is only client-gated), seating you in
+  all slots at once. **It's a solo/self-play table — no second human can join**
+  (the direct "claim a second seat in someone's game" action is enforced
+  server-side and cannot be unlocked).
+- **Status line** — shows `UNLOCKED (client-side)` / `LOCKED` and deck count.
 
 ## Install
 
@@ -46,8 +50,8 @@ restores free-account quality-of-life features and adds a lobby helper panel.
    [Violentmonkey](https://violentmonkey.github.io/).
 2. Open `untap-perk-unlocker.user.js` and let the extension pick up the
    userscript header, or create a new script and paste the file contents.
-3. Load `https://untap.in` — the status chip appears bottom-left, `F8` toggles
-   the lobby panel.
+3. Load `https://untap.in` — the green dot appears bottom-left; click it for the
+   menu.
 
 ## Friends-only join
 

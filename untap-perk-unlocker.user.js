@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Untap.in Perk Unlocker
 // @namespace    untap-recon
-// @version      0.13.0
-// @description  Free-account QoL unlocks + lobby (F8) + second-seat (F9) + custom card sleeve (F10) + local playmat (F11)
+// @version      0.14.0
+// @description  Free-account QoL unlocks with a collapsible green-dot menu: lobby, card sleeve, local playmat, multi-seat game
 // @match        https://untap.in/*
 // @run-at       document-idle
 // @grant        none
@@ -28,6 +28,8 @@
     accountStore: null,
     patchedUpdateAccount: false,
     chip: null,
+    menu: null,
+    menuOpen: false,
     chipInterval: null,
     lobby: null,
     lobbyBody: null,
@@ -194,8 +196,11 @@
     }, 1500);
   }
 
-  // ---- status chip ----
+  // ---- green-dot menu ----
+  // A tiny draggable green dot in the corner. Clicking it opens a collapsible
+  // panel with the status line and a button per feature; nothing is keybind-only.
   const CHIP_POS_KEY = 'ut-unlock-chip-pos';
+  const MENU_OPEN_KEY = 'ut-unlock-menu-open';
 
   function loadChipPos() {
     try { return JSON.parse(localStorage.getItem(CHIP_POS_KEY) || 'null'); } catch (e) { return null; }
@@ -204,65 +209,83 @@
     try { localStorage.setItem(CHIP_POS_KEY, JSON.stringify({ x, y })); } catch (e) { /* ignore */ }
   }
 
+  function menuBtn(text, onClick) {
+    const b = document.createElement('button');
+    b.textContent = text;
+    b.style.cssText = [
+      'display:block', 'width:100%', 'text-align:left', 'margin:3px 0',
+      'padding:5px 8px', 'cursor:pointer', 'background:#1b1b1b', 'color:#ddd',
+      'border:1px solid #0a0', 'border-radius:4px', 'font-size:11px',
+      'font-family:sans-serif', 'white-space:nowrap',
+    ].join(';');
+    b.addEventListener('mouseenter', () => { b.style.background = '#262626'; });
+    b.addEventListener('mouseleave', () => { b.style.background = '#1b1b1b'; });
+    b.addEventListener('click', (ev) => { ev.stopPropagation(); try { onClick(); } catch (e) { warn('menu action failed', e); } });
+    return b;
+  }
+
+  function setMenuOpen(open) {
+    state.menuOpen = open;
+    try { localStorage.setItem(MENU_OPEN_KEY, open ? '1' : ''); } catch (e) { /* ignore */ }
+    if (state.menu) state.menu.style.display = open ? 'block' : 'none';
+    if (state.chip) state.chip.style.opacity = open ? '1' : '0.5';
+  }
+
   function buildChip() {
     // Only trust the cache while the node is actually in the document;
     // a detached chip (removed by the app or body not yet ready) must be rebuilt.
     if (state.chip && state.chip.isConnected) return state.chip;
     state.chip = null;
-    // v0.6.0: the chip is a tiny dot in the TOP-LEFT corner, invisible until hovered,
-    // and it never intercepts clicks except on the dot itself. This keeps it away from
-    // the in-game bottom-right HUD (commander damage / life counters).
+
     const container = document.createElement('div');
     container.id = 'ut-unlock-chip';
     container.style.cssText = [
-      'position:fixed', 'left:4px', 'bottom:4px', 'z-index:2147483647',
-      'pointer-events:none', 'font-family:sans-serif', 'font-size:11px',
-      'display:flex', 'align-items:center', 'gap:4px',
-      'background:transparent', 'color:#0f0', 'padding:0',
-      'border:none', 'opacity:0.35',
+      'position:fixed', 'left:6px', 'bottom:6px', 'z-index:2147483647',
+      'font-family:sans-serif', 'display:flex', 'align-items:flex-end', 'gap:6px',
+      'opacity:0.5',
     ].join(';');
-    // restore a saved position (drag) if present
     const saved = loadChipPos();
     if (saved && typeof saved.x === 'number' && typeof saved.y === 'number') {
-      container.style.right = 'auto';
-      container.style.bottom = 'auto';
-      container.style.left = saved.x + 'px';
-      container.style.top = saved.y + 'px';
+      container.style.right = 'auto'; container.style.bottom = 'auto';
+      container.style.left = saved.x + 'px'; container.style.top = saved.y + 'px';
     }
 
-    const label = document.createElement('span');
-    label.id = 'ut-unlock-chip-label';
-    label.textContent = 'UT-UNLOCK: initializing...';
-    label.style.cssText = 'pointer-events:none;display:none;background:rgba(20,20,20,0.9);border:1px solid #0f0;border-radius:4px;padding:2px 6px;white-space:nowrap;';
-
-    // Minimal UI: a single tiny dot. Hovering shows the status; clicking the dot
-    // toggles "always show the label". Nothing else is clickable, so the chip can
-    // never eat a click meant for the game board.
+    // The dot: click toggles the menu (collapse), drag repositions.
     const dot = document.createElement('span');
     dot.id = 'ut-unlock-dot';
     dot.textContent = '\u25CF';
-    dot.style.cssText = 'pointer-events:auto;cursor:pointer;color:#0f0;font-size:8px;line-height:1;opacity:0.6;';
-    dot.title = 'UT-UNLOCK';
+    dot.style.cssText = 'cursor:pointer;color:#0f0;font-size:12px;line-height:1;user-select:none;';
+    dot.title = 'UT-UNLOCK menu (click to open/close, drag to move)';
 
-    const PIN_KEY = 'ut-unlock-chip-pinned';
-    let pinned = false;
-    try { pinned = localStorage.getItem(PIN_KEY) === '1'; } catch (e) { /* ignore */ }
+    // The collapsible menu panel.
+    const menu = document.createElement('div');
+    menu.id = 'ut-unlock-menu';
+    menu.style.cssText = [
+      'display:none', 'background:rgba(16,16,16,0.96)', 'border:1px solid #0a0',
+      'border-radius:6px', 'padding:8px', 'min-width:210px', 'max-width:260px',
+      'box-shadow:0 4px 16px rgba(0,0,0,0.6)', 'color:#ddd', 'font-size:11px',
+    ].join(';');
 
-    const applyPinned = () => {
-      label.style.display = pinned ? '' : 'none';
-      container.style.opacity = pinned ? '1' : '0.35';
-    };
+    const status = document.createElement('div');
+    status.id = 'ut-unlock-status';
+    status.style.cssText = 'margin-bottom:6px;font-weight:bold;white-space:nowrap;';
+    status.textContent = 'initializing...';
+    menu.appendChild(status);
 
-    container.addEventListener('mouseenter', () => { label.style.display = ''; container.style.opacity = '1'; });
-    container.addEventListener('mouseleave', () => { applyPinned(); });
-    dot.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      pinned = !pinned;
-      try { localStorage.setItem(PIN_KEY, pinned ? '1' : ''); } catch (e) { /* ignore */ }
-      applyPinned();
-    });
+    menu.appendChild(menuBtn('Lobby helper (locked rooms)', () => toggleLobby()));
+    menu.appendChild(menuBtn('Set card sleeve (deck back)', () => setCardSleeve()));
+    menu.appendChild(menuBtn('Set local playmat (you only)', () => setLocalMat()));
+    menu.appendChild(menuBtn('Clear local playmat', () => clearLocalMat()));
+    menu.appendChild(menuBtn('Create multi-seat game', () => createMultiSeatGame()));
 
-    // Dragging the dot repositions the chip (saved across reloads).
+    const note = document.createElement('div');
+    note.style.cssText = 'margin-top:6px;color:#888;font-size:10px;line-height:1.3;white-space:normal;';
+    note.textContent = 'Multi-seat = deck-vs-deck: you play every seat yourself (no second human). Playmat shows to you only.';
+    menu.appendChild(note);
+
+    dot.addEventListener('click', (ev) => { ev.stopPropagation(); setMenuOpen(!state.menuOpen); });
+
+    // Dragging the dot repositions the whole chip (saved across reloads).
     dot.addEventListener('mousedown', (ev) => {
       if (ev.button !== 0) return;
       ev.preventDefault();
@@ -281,31 +304,30 @@
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
-        if (moved) {
-          const r = container.getBoundingClientRect();
-          saveChipPos(r.left, r.top);
-        }
+        if (moved) { const r = container.getBoundingClientRect(); saveChipPos(r.left, r.top); }
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
 
     container.appendChild(dot);
-    container.appendChild(label);
-    applyPinned();
-
+    container.appendChild(menu);
+    state.menu = menu;
     if (document.body) {
       document.body.appendChild(container);
       state.chip = container;
     }
+    // restore collapse state
+    let open = false;
+    try { open = localStorage.getItem(MENU_OPEN_KEY) === '1'; } catch (e) { /* ignore */ }
+    setMenuOpen(open);
     return container;
   }
 
   function updateChip() {
-    if (state.chip && state.chip.isConnected && state.lastChipText) { /* set below */ }
     const container = buildChip();
     if (!container) return;
-    const label = container.querySelector('#ut-unlock-chip-label');
+    const status = container.querySelector('#ut-unlock-status');
     const dotEl = container.querySelector('#ut-unlock-dot');
     const accountStore = window.accountStore;
     const account = accountStore && accountStore.account;
@@ -322,13 +344,11 @@
       }
     } catch (e) { /* ignore */ }
 
-    // Only write to the DOM when the rendered text actually changed — the chip sits inside the
-    // app's layout, so a redundant textContent write can cost a style recalc.
     const text = (hasPerks ? 'UNLOCKED (client-side)' : 'LOCKED') + deckInfo;
-    if (label && state.lastChipText !== text) {
+    if (status && state.lastChipText !== text) {
       state.lastChipText = text;
-      label.textContent = text;
-      label.style.color = hasPerks ? '#0f0' : '#f55';
+      status.textContent = text;
+      status.style.color = hasPerks ? '#0f0' : '#f55';
     }
     const dotColor = hasPerks ? '#0f0' : '#f55';
     if (dotEl && state.lastDotColor !== dotColor) {
@@ -713,94 +733,62 @@
   }
 
   // =====================================================================
-  // Second-seat claim (F9): the app lets you play more than one seat in the
-  // same game (claimSeatLabel: "Play a second seat" / "Play another seat"),
-  // but gates the button behind auths.perks — secondSeat()/claimSeat() both
-  // open the upgrade modal when !$account.auths.perks. The underlying store
-  // action myGameStore.claimAltSeat() -> do('claim-alt-seat',{}) carries NO
-  // perk check, so with hasPerks already patched the UI button works too; F9
-  // just drives the same store action directly so it works even if the button
-  // isn't rendered yet. releaseAltSeat() -> do('release-alt-seat') undoes it.
+  // Multi-seat game (deck-vs-deck): the paid "play multiple seats yourself"
+  // capability. The direct claim-alt-seat action is SERVER-enforced (a free
+  // account gets ["Claiming a second seat is a Powered-Up perk.", ...]), so it
+  // cannot be unlocked. BUT the deck-vs-deck game mode seats you in every slot
+  // at creation and never calls claim-alt-seat — and create-game-ge2 accepts
+  // deckvdeck:true from a free account (the UI toggle is client-gated only).
+  // Confirmed live: created with deckvdeck:true, deckvdeckSeats:N as a free
+  // account -> you control all N seats (mySeats = [you, bizarro-you, ...]).
   //
-  // Guards mirror the app's own showClaimSeat/canSecondSeat getters so we only
-  // fire when a claim is actually legal (avoids a wasted RPC + server reject):
-  //   - must be in a game, as a player (not spectator)
-  //   - gameType 'game', not a deckvdeck table
-  //   - game state PENDING, room not full, haven't played yet
-  //   - current seat count below the app's max (8 — the alt-seat prefix list
-  //     "","bizarro-","clone-","alt-","echo-","shadow-","twin-","ghost-")
+  // Caveat: deck-vs-deck is a SOLO table (players:1, maxPlayers===seats, all
+  // seats filled by you) — no second human can join. It's self-play across
+  // your own decks, which is the multi-seat experience, not a shared lobby.
   // =====================================================================
-  const MAX_SEATS = 8;
-
-  function seatState() {
+  async function createMultiSeatGame() {
     const stores = storeMap();
-    const myGame = stores && stores.get('myGameStore');
-    const g = myGame && myGame.obj;
+    const api = stores && stores.get('apiStore');
+    if (!api || typeof api.send !== 'function') { warn('multi-seat: no apiStore'); return; }
     const acct = (window.accountStore && window.accountStore.account) || {};
-    const me = acct.username;
-    if (!myGame || !g || !me) return { myGame: null, g: null, reason: 'not in a game' };
-    const seats = (g.mySeats || []).length;
-    return { myGame, g, me, seats };
-  }
+    if (!acct.username) { log('multi-seat: not logged in'); return; }
 
-  function canClaimSeat(st) {
-    const { g, me } = st;
-    if (!g) return 'not in a game';
-    if (g.isSpectator) return 'spectating — not a player';
-    if (g.gameType !== 'game') return 'not a standard game';
-    if (g.gameOptions && g.gameOptions.deckvdeck) return 'deck-vs-deck table';
-    if (!(g.playerUsernames || []).includes(me)) return 'not seated in this game';
-    if (g.currentGame && g.currentGame.state !== 'PENDING') return 'game already started';
-    if ((g.gamesPlayed || []).length > 1) return 'already played here';
-    const max = g.maxPlayers || 0;
-    if (max && (g.players || []).length >= max) return 'room is full';
-    if ((g.mySeats || []).length >= MAX_SEATS) return 'already at the seat limit (' + MAX_SEATS + ')';
-    return null; // ok
-  }
+    const raw = window.prompt('How many seats (decks) do you want to play? (2-6)', '2');
+    if (raw == null) return;
+    let seats = parseInt(raw, 10);
+    if (!(seats >= 2 && seats <= 6)) { log('multi-seat: seat count must be 2-6'); return; }
 
-  function claimSecondSeat() {
-    const st = seatState();
-    if (!st.myGame) { setLobbyStatus(''); log('F9: not in a game'); return; }
-    const before = st.seats;
-    const why = canClaimSeat(st);
-    if (why) { log('F9: cannot claim second seat —', why); return; }
-    log('F9: claiming second seat (current seats: ' + before + ')');
+    // Pick a game type from the user's decks (ccg/type must match a deck they own).
+    const decks = myDecks();
+    const type = decks.length ? (decks[0].type || 'mtg') : 'mtg';
+
+    const payload = {
+      gameType: 'game', title: 'multi-seat', engine: 'ge2', type, ccg: type,
+      format: null, players: 1, blocks: (acct.blocks || []), gamePass: null,
+      maxDeckValue: null, mirror: false, deckvdeck: true, deckvdeckSeats: seats,
+      teamPlay: false, allowSpectators: true, privateReplay: false,
+      onlyDraftDecks: false, onlyFriends: false, onlySportsmanship: false,
+      onlyPatrons: false,
+    };
+    log('multi-seat: creating deck-vs-deck game with', seats, 'seats');
     try {
-      st.myGame.claimAltSeat();
-    } catch (e) {
-      warn('F9: claimAltSeat threw', e);
-      return;
-    }
-    // The claim is confirmed asynchronously (server pushes a new _player_ row
-    // into gamesStore, obj recomputes mySeats). Poll briefly to log the result.
-    const start = Date.now();
-    const poll = setInterval(() => {
-      const now = seatState();
-      if (!now.myGame) { clearInterval(poll); return; }
-      if (now.seats > before) {
-        clearInterval(poll);
-        log('F9: second seat confirmed (seats: ' + now.seats + ')');
-      } else if (Date.now() - start > 6000) {
-        clearInterval(poll);
-        warn('F9: second seat not confirmed within 6s (seats still ' + now.seats + ')');
+      const resp = await api.send('create-game-ge2', payload);
+      // success: [null, "Game created.", "G-xxxx"]
+      if (Array.isArray(resp) && resp[0]) { warn('multi-seat: rejected —', resp[0]); return; }
+      const uid = Array.isArray(resp) ? resp[2] : null;
+      if (uid) {
+        log('multi-seat: created', uid, '— opening');
+        window.location.href = '/' + uid;
+      } else {
+        log('multi-seat: created (no uid in reply)', resp);
       }
-    }, 300);
-  }
-
-  function releaseSecondSeat() {
-    const st = seatState();
-    if (!st.myGame) { log('F9: not in a game'); return; }
-    if (st.seats <= 1) { log('Shift+F9: only one seat — nothing to release'); return; }
-    log('Shift+F9: releasing a seat (current seats: ' + st.seats + ')');
-    try {
-      st.myGame.releaseAltSeat();
     } catch (e) {
-      warn('Shift+F9: releaseAltSeat threw', e);
+      warn('multi-seat: create-game-ge2 failed', e);
     }
   }
 
   // =====================================================================
-  // Custom card sleeve / card back (F10): SERVER-BACKED, visible to opponents.
+  // Custom card sleeve / card back: SERVER-BACKED, visible to opponents.
   // The account-level sleeve (set-user-image type:'deck' -> /sleeve/<username>)
   // is tier-gated server-side (410 for free accounts). But the PER-DECK sleeve
   // RPC `update-deck-back` is NOT tier-checked and its image is served from the
@@ -872,23 +860,23 @@
 
   async function setCardSleeve() {
     const deckUid = targetDeckUid();
-    if (!deckUid) { log('F10: no deck to set a sleeve on'); return; }
+    if (!deckUid) { log('sleeve: no deck to set a sleeve on'); return; }
     let dataUri;
     try { dataUri = await pickImageFile(SLEEVE_W, SLEEVE_H); }
-    catch (e) { log('F10: image pick cancelled'); return; }
-    log('F10: uploading sleeve to deck', deckUid);
+    catch (e) { log('sleeve: image pick cancelled'); return; }
+    log('sleeve: uploading to deck', deckUid);
     try {
       const resp = await callRpc('update-deck-back', { deck_uid: deckUid, dataUri, zone: 'deck-1' });
       // success reply is [null, "Success, card sleeve updated."]; error is [msg, ...]
-      if (Array.isArray(resp) && resp[0]) { warn('F10: sleeve rejected —', resp[0]); return; }
-      log('F10: sleeve set (served via /cardimg/' + deckUid + '/deck_back)');
+      if (Array.isArray(resp) && resp[0]) { warn('sleeve rejected —', resp[0]); return; }
+      log('sleeve set (served via /cardimg/' + deckUid + '/deck_back)');
     } catch (e) {
-      warn('F10: update-deck-back failed', e);
+      warn('sleeve: update-deck-back failed', e);
     }
   }
 
   // =====================================================================
-  // Local playmat (F11): board background, LOCAL-ONLY (visible to you, not to
+  // Local playmat: board background, LOCAL-ONLY (visible to you, not to
   // opponents). The real playmat is served from /playmat/<username>?<uid>,
   // which the server refuses (410) for free accounts and which every opponent's
   // own client fetches independently — so there is no way to make a custom mat
@@ -920,18 +908,20 @@
   async function setLocalMat() {
     let dataUri;
     try { dataUri = await pickImageFile(1208, 340); } // 2x the recommended 604x170
-    catch (e) { log('F11: image pick cancelled'); return; }
-    try { localStorage.setItem(MAT_KEY, dataUri); } catch (e) { warn('F11: could not persist mat (too large?)'); }
+    catch (e) { log('playmat: image pick cancelled'); return; }
+    try { localStorage.setItem(MAT_KEY, dataUri); } catch (e) { warn('playmat: could not persist (too large?)'); }
     applyLocalMat(dataUri);
-    log('F11: local playmat applied (visible to you only, not opponents)');
+    log('playmat: local mat applied (visible to you only, not opponents)');
   }
 
   function clearLocalMat() {
     try { localStorage.removeItem(MAT_KEY); } catch (e) { /* ignore */ }
     applyLocalMat(null);
-    log('Shift+F11: local playmat cleared');
+    log('playmat: local mat cleared');
   }
 
+  // F8 is a convenience hotkey for the lobby helper; every feature is also in
+  // the green-dot menu, so nothing is keybind-only.
   function bindLobbyHotkey() {
     document.addEventListener('keydown', (e) => {
       const t = e.target;
@@ -940,20 +930,6 @@
       if (e.key === 'F8' && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault();
         toggleLobby();
-      }
-      if (e.key === 'F9' && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        e.preventDefault();
-        if (e.shiftKey) releaseSecondSeat();
-        else claimSecondSeat();
-      }
-      if (e.key === 'F10' && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        e.preventDefault();
-        setCardSleeve();
-      }
-      if (e.key === 'F11' && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        e.preventDefault();
-        if (e.shiftKey) clearLocalMat();
-        else setLocalMat();
       }
     });
   }

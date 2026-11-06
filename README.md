@@ -42,6 +42,18 @@ also still answers `F8` as a shortcut).
   all slots at once. **It's a solo/self-play table — no second human can join**
   (the direct "claim a second seat in someone's game" action is enforced
   server-side and cannot be unlocked).
+- **Download summary CSV** (menu button) — your overall record
+  (wins/draws/losses/unrecorded/hours/win-rate) plus a **per-opponent W/L/D**
+  table built from `get-game-stats` (your own recorded games; multi-player games
+  credit the single result against each opponent; "Don't Record" games excluded).
+- **Download game history CSV** (menu button) — one row per game from your
+  replay list: game_uid, created, format, title, opponents, rounds, duration,
+  event_count, private. Instant.
+- **Download rich history CSV (slow!)** (menu button) — same as the history CSV
+  but also fetches and decodes **every** replay to add the winner and each
+  player's deck_uid per game. Prompts for confirmation first because it is one
+  download + gunzip + parse per game (slow for large histories; replays older
+  than ~60 days may be unavailable).
 - **Status line** — shows `UNLOCKED (client-side)` / `LOCKED` and deck count.
 
 ## Install

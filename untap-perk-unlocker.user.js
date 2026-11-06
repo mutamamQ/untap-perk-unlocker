@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Untap.in Perk Unlocker
 // @namespace    untap-recon
-// @version      1.0.0
-// @description  Free-account QoL unlocks with a collapsible green-dot menu: lobby, card sleeve, local playmat, multi-seat game
+// @version      1.1.0
+// @description  Free-account QoL unlocks with a collapsible green-dot menu: lobby, card sleeve, local playmat, multi-seat game, stats CSV export
 // @match        https://untap.in/*
 // @run-at       document-idle
 // @grant        none
@@ -277,6 +277,9 @@
     menu.appendChild(menuBtn('Set local playmat (you only)', () => setLocalMat()));
     menu.appendChild(menuBtn('Clear local playmat', () => clearLocalMat()));
     menu.appendChild(menuBtn('Create multi-seat game', () => createMultiSeatGame()));
+    menu.appendChild(menuBtn('Download summary CSV', () => downloadSummaryCsv()));
+    menu.appendChild(menuBtn('Download game history CSV', () => downloadHistoryCsv()));
+    menu.appendChild(menuBtn('Download rich history CSV (slow!)', () => downloadHistoryRichCsv()));
 
     const note = document.createElement('div');
     note.style.cssText = 'margin-top:6px;color:#888;font-size:10px;line-height:1.3;white-space:normal;';
@@ -730,6 +733,249 @@
       if (state.lobby && state.lobby.parentNode) state.lobby.parentNode.removeChild(state.lobby);
       state.lobby = null;
     }
+  }
+
+  // =====================================================================
+  // Stats export (CSV). Read-only RPCs:
+  //  - get-game-summary {username} -> {wins,draws,losses,noRecord,time}
+  //  - get-game-stats null -> [{start_time,duration,title,players[],winner,
+  //      recorded}, ...] for YOUR OWN account (winner === me counts as a win;
+  //      winner "draw"/empty = draw; any other winner = loss). This is the cheap
+  //      route to real per-opponent W/L — one RPC, no replay downloads.
+  //  - get-profile-replays {username} -> [{game_uid,ccg,title,rounds,start_time,
+  //      end_time,event_count,created,size,views,private,players[]}, ...]
+  //  - POST /api/replay-fetch {username,token,gameUid} -> {meta, blob}; blob is
+  //      base64(gzip(JSON {meta,events})). events carry gameWinner + per-seat
+  //      deckUid. Heavy: one fetch + gunzip + parse per game.
+  // =====================================================================
+  function csvCell(v) {
+    const s = v == null ? '' : String(v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+
+  function downloadCsv(filename, rows) {
+    const text = rows.map(r => r.map(csvCell).join(',')).join('\n');
+    const blob = new Blob([text], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  function msToHMS(ms) {
+    if (!(ms > 0)) return '';
+    const s = Math.round(ms / 1000);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return (h ? h + 'h ' : '') + (m ? m + 'm ' : '') + sec + 's';
+  }
+
+  // Classify a get-game-stats row result from MY perspective (mirrors the app's
+  // own chart logic: winner===me -> win; winner "draw"/empty -> draw; else loss).
+  function classifyResult(winner, me) {
+    if (winner === me) return 'win';
+    if (!winner || winner === 'draw') return 'draw';
+    return 'loss';
+  }
+
+  async function downloadSummaryCsv() {
+    const acct = (window.accountStore && window.accountStore.account) || {};
+    const me = acct.username;
+    if (!me) { log('summary CSV: not logged in'); return; }
+    log('summary CSV: fetching...');
+    let summary = {}, stats = [];
+    try { summary = await callRpc('get-game-summary', me) || {}; }
+    catch (e) { warn('summary CSV: get-game-summary failed', e); }
+    // get-game-stats carries the per-game winner for YOUR own games.
+    try { stats = await callRpc('get-game-stats', null) || []; }
+    catch (e) { warn('summary CSV: get-game-stats failed', e); }
+
+    const rows = [];
+    rows.push(['section', 'metric', 'value']);
+    rows.push(['record', 'wins', summary.wins || 0]);
+    rows.push(['record', 'draws', summary.draws || 0]);
+    rows.push(['record', 'losses', summary.losses || 0]);
+    rows.push(['record', 'unrecorded', summary.noRecord || 0]);
+    const totalGames = (summary.wins || 0) + (summary.draws || 0) + (summary.losses || 0) + (summary.noRecord || 0);
+    rows.push(['record', 'total_recorded_games', totalGames]);
+    rows.push(['record', 'hours_played', summary.time || 0]);
+    const decided = (summary.wins || 0) + (summary.losses || 0);
+    rows.push(['record', 'win_rate_pct', decided ? (100 * (summary.wins || 0) / decided).toFixed(1) : '']);
+
+    // Per-opponent W/L/D from get-game-stats. For each recorded game, credit the
+    // result against every other seat. Multi-player games count the one result
+    // against each opponent (noted in the header).
+    const vs = {}; // opponent -> {w,l,d,games}
+    let usableRows = 0;
+    for (const g of stats) {
+      if (g.recorded === false) continue; // "Don't Record" games
+      const players = g.players || [];
+      if (!players.includes(me)) continue;
+      const res = classifyResult(g.winner, me);
+      usableRows++;
+      for (const p of players) {
+        if (p === me) continue;
+        const o = vs[p] || (vs[p] = { w: 0, l: 0, d: 0, games: 0 });
+        o.games++;
+        if (res === 'win') o.w++; else if (res === 'loss') o.l++; else o.d++;
+      }
+    }
+    const opps = Object.keys(vs).sort((a, b) => vs[b].games - vs[a].games);
+    rows.push([]);
+    rows.push(['opponent', 'games', 'wins', 'losses', 'draws', 'win_rate_pct']);
+    if (!opps.length) {
+      rows.push(['(no recorded games found via get-game-stats)', '', '', '', '', '']);
+    } else {
+      for (const o of opps) {
+        const v = vs[o];
+        const dec = v.w + v.l;
+        rows.push([o, v.games, v.w, v.l, v.d, dec ? (100 * v.w / dec).toFixed(1) : '']);
+      }
+    }
+    rows.push([]);
+    rows.push(['note', 'per-opponent W/L/D is from get-game-stats (your own recorded games only); multi-player games credit the single result against each opponent', '']);
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadCsv('untap-summary-' + me + '-' + stamp + '.csv', rows);
+    log('summary CSV: downloaded (' + opps.length + ' opponents, ' + usableRows + ' recorded games)');
+  }
+
+  async function downloadHistoryCsv() {
+    const acct = (window.accountStore && window.accountStore.account) || {};
+    const me = acct.username;
+    if (!me) { log('history CSV: not logged in'); return; }
+    log('history CSV: fetching...');
+    let replays = [];
+    try { replays = await callRpc('get-profile-replays', me) || []; }
+    catch (e) { warn('history CSV: get-profile-replays failed', e); return; }
+
+    const rows = [];
+    rows.push(['game_uid', 'created', 'format', 'title', 'opponents', 'rounds', 'duration', 'event_count', 'private']);
+    const sorted = replays.slice().sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+    for (const r of sorted) {
+      const opponents = (r.players || []).filter(p => p !== me).join('; ');
+      const dur = (r.end_time && r.start_time) ? msToHMS(r.end_time - r.start_time) : '';
+      rows.push([
+        r.game_uid, r.created, r.ccg, r.title, opponents,
+        r.rounds != null ? r.rounds : '', dur,
+        r.event_count != null ? r.event_count : '', r.private ? 'yes' : 'no',
+      ]);
+    }
+    if (!replays.length) rows.push(['(no replays in history)', '', '', '', '', '', '', '', '']);
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadCsv('untap-history-' + me + '-' + stamp + '.csv', rows);
+    log('history CSV: downloaded (' + replays.length + ' games)');
+  }
+
+  // Fetch + decode a single replay. Returns {winner, decks:{player:deckUid}} or
+  // null on failure. Winner comes from the last ENDED gamesPlayed entry's
+  // playerObjs[*].gameWinner; decks from game-deck-insert/update events.
+  async function fetchReplayDetail(gameUid) {
+    const api = (storeMap() && storeMap().get('apiStore'));
+    const auth = (api && api.auth) || {};
+    let data;
+    try {
+      const resp = await fetch('/api/replay-fetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ username: auth.username, token: auth.token, gameUid }),
+      });
+      if (!resp.ok) return null;
+      data = await resp.json();
+    } catch (e) { return null; }
+    if (!data || !data.blob) return null;
+    let obj;
+    try {
+      const bin = Uint8Array.from(atob(data.blob), c => c.charCodeAt(0));
+      const stream = new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'));
+      const buf = await new Response(stream).arrayBuffer();
+      obj = JSON.parse(new TextDecoder().decode(buf));
+    } catch (e) { return null; }
+
+    const events = obj.events || [];
+    // winner: scan events for gamesPlayed entries, keep the last ENDED one's winner
+    let winner = null;
+    const scanForWinner = (val) => {
+      if (!val || typeof val !== 'object') return;
+      if (Array.isArray(val.gamesPlayed)) {
+        for (const gp of val.gamesPlayed) {
+          if (gp && gp.state === 'ENDED' && gp.playerObjs) {
+            for (const u of Object.keys(gp.playerObjs)) {
+              const gw = gp.playerObjs[u] && gp.playerObjs[u].gameWinner;
+              if (gw) winner = gw;
+            }
+          }
+        }
+      }
+    };
+    const decks = {};
+    for (const ev of events) {
+      const d = ev && ev.d;
+      if (!d) continue;
+      if (ev.e === 'game-upsert') scanForWinner(d);
+      if (ev.e === 'game-upsert-path' && Array.isArray(d.path) && d.path[0] === 'gamesPlayed') {
+        // winner updates arrive as a path write; the full-object scan above
+        // usually catches it, but capture a direct gameWinner path too.
+        if (d.path.indexOf('gameWinner') !== -1 && d.data) winner = d.data;
+      }
+      if ((ev.e === 'game-deck-insert' || ev.e === 'game-deck-update') && d.player && d.deckUid) {
+        decks[d.player] = d.deckUid;
+      }
+    }
+    return { winner, decks };
+  }
+
+  async function downloadHistoryRichCsv() {
+    const acct = (window.accountStore && window.accountStore.account) || {};
+    const me = acct.username;
+    if (!me) { log('rich history CSV: not logged in'); return; }
+    let replays = [];
+    try { replays = await callRpc('get-profile-replays', me) || []; }
+    catch (e) { warn('rich history CSV: get-profile-replays failed', e); return; }
+    if (!replays.length) { log('rich history CSV: no replays'); downloadCsv('untap-history-rich-' + me + '.csv', [['(no replays in history)']]); return; }
+
+    const n = replays.length;
+    const ok = window.confirm(
+      'Rich history export downloads and decodes EVERY replay (' + n + ' games) one by one to\n' +
+      'recover the winner and each player\'s deck. This is SLOW — roughly ' +
+      Math.ceil(n * 0.7) + '-' + Math.ceil(n * 1.5) + ' seconds, possibly much longer for big games.\n\n' +
+      'Replays older than ~60 days may no longer be fetchable. Continue?'
+    );
+    if (!ok) { log('rich history CSV: cancelled'); return; }
+
+    log('rich history CSV: fetching ' + n + ' replays (this is slow)...');
+    const sorted = replays.slice().sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+    const rows = [];
+    rows.push(['game_uid', 'created', 'format', 'title', 'opponents', 'winner', 'my_result', 'my_deck_uid', 'player_decks', 'rounds', 'duration', 'event_count']);
+    let done = 0, failed = 0;
+    for (const r of sorted) {
+      const opponents = (r.players || []).filter(p => p !== me).join('; ');
+      const dur = (r.end_time && r.start_time) ? msToHMS(r.end_time - r.start_time) : '';
+      let winner = '', myResult = '', myDeck = '', playerDecks = '';
+      const detail = await fetchReplayDetail(r.game_uid);
+      if (detail) {
+        winner = detail.winner || '';
+        myResult = detail.winner ? classifyResult(detail.winner, me) : '';
+        myDeck = detail.decks[me] || '';
+        playerDecks = Object.keys(detail.decks).map(p => p + '=' + detail.decks[p]).join('; ');
+      } else {
+        failed++;
+      }
+      rows.push([
+        r.game_uid, r.created, r.ccg, r.title, opponents, winner, myResult, myDeck, playerDecks,
+        r.rounds != null ? r.rounds : '', dur, r.event_count != null ? r.event_count : '',
+      ]);
+      done++;
+      if (done % 5 === 0) log('rich history CSV: ' + done + '/' + n + ' done');
+    }
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadCsv('untap-history-rich-' + me + '-' + stamp + '.csv', rows);
+    log('rich history CSV: downloaded (' + done + ' games, ' + failed + ' could not be fetched)');
   }
 
   // =====================================================================

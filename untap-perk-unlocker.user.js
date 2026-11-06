@@ -1115,7 +1115,25 @@
       const resp = await callRpc('update-deck-back', { deck_uid: deckUid, dataUri, zone: 'deck-1' });
       // success reply is [null, "Success, card sleeve updated."]; error is [msg, ...]
       if (Array.isArray(resp) && resp[0]) { warn('sleeve rejected —', resp[0]); return; }
-      log('sleeve set (served via /cardimg/' + deckUid + '/deck_back)');
+      // The RPC persists the uid, but the app caches card images by [uid,set] and
+      // won't re-fetch an already-loaded default back. Bust the cardStore cache
+      // (what the deck editor itself does via rmCardCache) and poke deck.deck_back
+      // so the sleeve actually shows without a reload.
+      try {
+        const stores = storeMap();
+        const cardStore = stores && stores.get('cardStore');
+        const bust = (cardStore && (cardStore.rmCardCache || cardStore.removeBusCard));
+        if (cardStore && typeof cardStore.rmCardCache === 'function') {
+          cardStore.rmCardCache(deckUid, 'deck_back');
+          cardStore.rmCardCache(deckUid, 'deck_back_2');
+        }
+        const ds = stores && stores.get('deckStore');
+        const deck = ds && Array.isArray(ds.deckListStore) && ds.deckListStore.find(d => d && d.deck_uid === deckUid);
+        if (deck) deck.deck_back = 'new' + Date.now();
+        // Drop any HTTP-cached copy too.
+        try { fetch('/cardimg/' + deckUid + '/deck_back?', { cache: 'reload' }); } catch (e) { /* ignore */ }
+      } catch (e) { warn('sleeve: cache-bust failed (sleeve still saved server-side)', e); }
+      log('sleeve set (served via /cardimg/' + deckUid + '/deck_back). If already in a game, reload to see it.');
     } catch (e) {
       warn('sleeve: update-deck-back failed', e);
     }

@@ -21,13 +21,13 @@ also still answers `F8` as a shortcut).
   access controls (password / friends-only / patron-only) and a join button. It
   mirrors the app's own list filter (hides blocked/started/full rooms) and
   never joins anything automatically.
-- **Custom card sleeve / card back** (menu button) — pick an image and it
-  becomes your deck's card back, visible to opponents in-game. Uses the
-  per-deck `update-deck-back` RPC (not the tier-gated account-level sleeve),
-  whose image is served from the ungated card-art route
-  `/cardimg/<deck_uid>/deck_back`. In a game it targets the loaded deck;
-  otherwise it uses your only deck (or prompts if you have several). The
-  account-level sleeve route is server-side tier-gated and can't be unlocked.
+- **Custom card sleeve / card back** (menu button) — pick an image to set as
+  your deck's card back via the per-deck `update-deck-back` RPC (served from the
+  ungated `/cardimg/<deck_uid>/deck_back` route rather than the tier-gated
+  account-level sleeve). **Note:** this did not render in testing, so it may not
+  actually work; the button is left in place in case the path works on another
+  account/setup. The account-level sleeve route is server-side tier-gated and
+  can't be unlocked.
 - **Local playmat** (menu buttons: set / clear) — pick an image to use as your
   board background. **Local-only: you see it, opponents do not.** The real
   playmat (`/playmat/<username>`) is served only to Powered-Up accounts (free

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Untap.in Perk Unlocker
 // @namespace    untap-recon
-// @version      0.14.0
+// @version      1.0.0
 // @description  Free-account QoL unlocks with a collapsible green-dot menu: lobby, card sleeve, local playmat, multi-seat game
 // @match        https://untap.in/*
 // @run-at       document-idle
@@ -273,14 +273,14 @@
     menu.appendChild(status);
 
     menu.appendChild(menuBtn('Lobby helper (locked rooms)', () => toggleLobby()));
-    menu.appendChild(menuBtn('Set card sleeve (deck back)', () => setCardSleeve()));
+    menu.appendChild(menuBtn('Set card sleeve (deck back)*', () => setCardSleeve()));
     menu.appendChild(menuBtn('Set local playmat (you only)', () => setLocalMat()));
     menu.appendChild(menuBtn('Clear local playmat', () => clearLocalMat()));
     menu.appendChild(menuBtn('Create multi-seat game', () => createMultiSeatGame()));
 
     const note = document.createElement('div');
     note.style.cssText = 'margin-top:6px;color:#888;font-size:10px;line-height:1.3;white-space:normal;';
-    note.textContent = 'Multi-seat = deck-vs-deck: you play every seat yourself (no second human). Playmat shows to you only.';
+    note.textContent = 'Multi-seat = deck-vs-deck: you play every seat yourself (no second human). Playmat shows to you only. *Card sleeve may not render.';
     menu.appendChild(note);
 
     dot.addEventListener('click', (ev) => { ev.stopPropagation(); setMenuOpen(!state.menuOpen); });
@@ -788,12 +788,12 @@
   }
 
   // =====================================================================
-  // Custom card sleeve / card back: SERVER-BACKED, visible to opponents.
-  // The account-level sleeve (set-user-image type:'deck' -> /sleeve/<username>)
-  // is tier-gated server-side (410 for free accounts). But the PER-DECK sleeve
-  // RPC `update-deck-back` is NOT tier-checked and its image is served from the
-  // ungated card-art route /cardimg/<deck_uid>/deck_back, so it renders in-game
-  // for everyone. We pick an image file locally and push it to a deck.
+  // Custom card sleeve / card back: pushes a per-deck sleeve via update-deck-back
+  // (served from the ungated /cardimg/<deck_uid>/deck_back route, unlike the
+  // tier-gated account-level set-user-image type:'deck' -> /sleeve/<username>).
+  // The RPC is accepted and the uid persists, but in testing the sleeve did NOT
+  // render in-game, so this may not actually work — kept in case the path works
+  // on another account/setup. We pick an image file locally and push it.
   // =====================================================================
   const SLEEVE_W = 223, SLEEVE_H = 310; // untap's recommended sleeve size
 

@@ -54,6 +54,13 @@ also still answers `F8` as a shortcut).
   player's deck_uid per game. Prompts for confirmation first because it is one
   download + gunzip + parse per game (slow for large histories; replays older
   than ~60 days may be unavailable).
+- **Export player decks (public)** (menu button) — enter a username; exports that
+  player's **public** decks two ways: a CSV index (username, title, format,
+  commander, card count, visibility, tags) and a `.txt` bundle of full decklists
+  (commander section, deck section with quantities, maybeboard). Commander is
+  read from the deck's `play-1` zone; format from `deck.format`. untap does not
+  store a Commander "bracket", so none is exported. Private decks are skipped by
+  design (their uid is null on the profile anyway).
 - **Status line** — shows `UNLOCKED (client-side)` / `LOCKED` and deck count.
 
 ## Install

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Untap.in Perk Unlocker
 // @namespace    untap-recon
-// @version      1.1.0
-// @description  Free-account QoL unlocks with a collapsible green-dot menu: lobby, card sleeve, local playmat, multi-seat game, stats CSV export
+// @version      1.2.0
+// @description  Free-account QoL unlocks with a collapsible green-dot menu: lobby, card sleeve, local playmat, multi-seat game, stats CSV, deck export
 // @match        https://untap.in/*
 // @run-at       document-idle
 // @grant        none
@@ -280,6 +280,7 @@
     menu.appendChild(menuBtn('Download summary CSV', () => downloadSummaryCsv()));
     menu.appendChild(menuBtn('Download game history CSV', () => downloadHistoryCsv()));
     menu.appendChild(menuBtn('Download rich history CSV (slow!)', () => downloadHistoryRichCsv()));
+    menu.appendChild(menuBtn('Export player decks (public)', () => exportPlayerDecks()));
 
     const note = document.createElement('div');
     note.style.cssText = 'margin-top:6px;color:#888;font-size:10px;line-height:1.3;white-space:normal;';
@@ -976,6 +977,138 @@
     const stamp = new Date().toISOString().slice(0, 10);
     downloadCsv('untap-history-rich-' + me + '-' + stamp + '.csv', rows);
     log('rich history CSV: downloaded (' + done + ' games, ' + failed + ' could not be fetched)');
+  }
+
+  // =====================================================================
+  // Player deck export (PUBLIC decks only). Given a username, list that user's
+  // public decks (get-profile) and their public replays (get-profile-replays),
+  // pull the deckUids each replay used (replay-fetch -> game-deck-update
+  // .deckUid), then get-deck each PUBLIC one and write a decklist export.
+  //
+  // We deliberately skip decks the profile marks visibility:"private" (uid is
+  // null there anyway). A private deck whose uid leaks via a replay is
+  // technically fetchable (get-deck has no ownership check) but exporting
+  // someone's private deck is not something this script does.
+  // =====================================================================
+  const CARD_ZONES = ['deck-1', 'play-1', 'maybe-1'];
+
+  function deckMeta(deck) {
+    // Commander = cards in play-1; bracket isn't stored by untap, so we derive a
+    // rough Bracket estimate from game-changers/land count when format=commander.
+    const cards = deck.cards || [];
+    const commanders = cards.filter(c => c.zone === 'play-1').map(c => c.title);
+    const total = cards.filter(c => c.zone === 'deck-1').reduce((n, c) => n + (c.qty || 1), 0);
+    return {
+      title: deck.title || '',
+      format: deck.format || '',
+      commanders,
+      cardCount: total,
+      tags: deck.tags || [],
+      description: deck.description || '',
+    };
+  }
+
+  function deckToTxt(deck, owner) {
+    const meta = deckMeta(deck);
+    const lines = [];
+    lines.push('# ' + (meta.title || 'Untitled') + ' — ' + owner);
+    if (meta.format) lines.push('# Format: ' + meta.format);
+    if (meta.commanders.length) lines.push('# Commander: ' + meta.commanders.join(', '));
+    lines.push('# Cards: ' + meta.cardCount);
+    lines.push('');
+    if (meta.commanders.length) {
+      lines.push('// Commander');
+      for (const c of deck.cards.filter(x => x.zone === 'play-1')) lines.push('1 ' + c.title);
+      lines.push('');
+    }
+    lines.push('// Deck');
+    for (const c of deck.cards.filter(x => x.zone === 'deck-1')) lines.push((c.qty || 1) + ' ' + c.title);
+    const maybe = deck.cards.filter(x => x.zone === 'maybe-1');
+    if (maybe.length) {
+      lines.push('');
+      lines.push('// Maybeboard');
+      for (const c of maybe) lines.push((c.qty || 1) + ' ' + c.title);
+    }
+    return lines.join('\n');
+  }
+
+  async function exportPlayerDecks() {
+    const raw = window.prompt('Export public decks for which username?', '');
+    if (!raw) { log('deck export: cancelled'); return; }
+    const target = String(raw).trim();
+    if (!target) return;
+    log('deck export: fetching profile for', target);
+
+    let profile, replays = [];
+    try { profile = await callRpc('get-profile', target); }
+    catch (e) { warn('deck export: get-profile failed', e); return; }
+    try { replays = await callRpc('get-profile-replays', target) || []; }
+    catch (e) { warn('deck export: get-profile-replays failed', e); }
+
+    // 1. Public decks straight off the profile (private ones have deck_uid null).
+    const publicDecks = ((profile && profile.decks) || []).filter(d => d && d.deck_uid && d.visibility === 'public');
+    const seen = new Set(publicDecks.map(d => d.deck_uid));
+
+    // 2. deckUids used in their public replays that aren't already on the profile.
+    //    Only keep ones the profile confirms as public (owner+visibility check).
+    const byUid = {};
+    for (const d of publicDecks) byUid[d.deck_uid] = d;
+    let extra = 0;
+    if (replays.length) {
+      log('deck export: scanning ' + replays.length + ' replays for deck uids...');
+      const limit = Math.min(replays.length, 25); // cap: replay-fetch is heavy
+      for (let i = 0; i < limit; i++) {
+        const detail = await fetchReplayDetail(replays[i].game_uid);
+        if (!detail || !detail.decks) continue;
+        for (const player of Object.keys(detail.decks)) {
+          if (player !== target) continue;
+          const uid = detail.decks[player];
+          if (!uid || seen.has(uid)) continue;
+          seen.add(uid);
+          // only export if the profile lists it as public
+          const meta = ((profile.decks || []).find(x => x && x.deck_uid === uid));
+          if (meta && meta.visibility === 'public') { byUid[uid] = meta; extra++; }
+        }
+      }
+    }
+
+    const uids = Object.keys(byUid);
+    if (!uids.length) {
+      log('deck export: no public decks found for ' + target);
+      downloadCsv('untap-decks-' + target + '.csv', [['username', 'title', 'format', 'commander', 'cards', 'visibility']].concat([['(no public decks)', '', '', '', '', '']]));
+      return;
+    }
+
+    log('deck export: fetching ' + uids.length + ' public decks...');
+    const index = [['username', 'title', 'format', 'commander', 'cards', 'visibility', 'tags']];
+    const bundle = [];
+    let ok = 0, failed = 0;
+    for (const uid of uids) {
+      let full;
+      try { full = await callRpc('get-deck', uid); }
+      catch (e) { failed++; continue; }
+      if (!full || full.visibility !== 'public') { failed++; continue; }
+      ok++;
+      const meta = deckMeta(full);
+      index.push([target, meta.title, meta.format, meta.commanders.join('; '), meta.cardCount, 'public', meta.tags.join('; ')]);
+      bundle.push(deckToTxt(full, target));
+    }
+
+    // CSV index of all their public decks + one .txt per deck in a single bundle.
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadCsv('untap-decks-' + target + '-' + stamp + '.csv', index);
+    const all = bundle.join('\n\n' + '='.repeat(60) + '\n\n');
+    const blob = new Blob([all], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'untap-decklists-' + target + '-' + stamp + '.txt';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+    log('deck export: ' + ok + ' public decks exported' + (failed ? ', ' + failed + ' skipped' : '') + (extra ? ', ' + extra + ' found via replays' : ''));
   }
 
   // =====================================================================
